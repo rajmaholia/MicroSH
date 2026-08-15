@@ -1,0 +1,423 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# ============================================================
+# MicroSH
+# Tiny Linux application manager
+#
+# v0.1
+#
+# Commands:
+#   microsh list
+#   microsh update
+#   microsh install <app>
+#   microsh uninstall <app>
+# ============================================================
+
+VERSION="0.1.0"
+
+GITHUB_USER="rajmaholia"
+GITHUB_REPO="MicroSH"
+GITHUB_BRANCH="main"
+
+API_URL="https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/apps"
+RAW_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/microsh"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/microsh"
+
+CATALOG="$CACHE_DIR/catalog.json"
+INSTALLED="$DATA_DIR/installed"
+
+APP_DIR="$DATA_DIR/apps"
+
+mkdir -p "$CACHE_DIR"
+mkdir -p "$DATA_DIR"
+mkdir -p "$APP_DIR"
+
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+
+error() {
+  echo "MicroSH: error: $*" >&2
+  exit 1
+}
+
+info() {
+  echo "MicroSH: $*"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 ||
+    error "required command '$1' is not installed"
+}
+
+check_dependencies() {
+  require_command curl
+  require_command jq
+}
+
+# ------------------------------------------------------------
+# GitHub
+# ------------------------------------------------------------
+
+github_apps() {
+  curl -fsSL \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "$API_URL"
+}
+
+github_app_contents() {
+  local app="$1"
+
+  curl -fsSL \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "$API_URL/$app"
+}
+
+download() {
+  curl -fsSL "$1"
+}
+
+# ------------------------------------------------------------
+# Download complete application directory
+# ------------------------------------------------------------
+
+download_app() {
+  local app="$1"
+  local destination="$2"
+  local contents
+  local name
+  local type
+  local url
+
+  contents="$(github_app_contents "$app")" || {
+    error "could not get application '$app' from GitHub"
+  }
+
+  if ! jq -e 'type == "array"' <<<"$contents" >/dev/null 2>&1; then
+    error "invalid application data received from GitHub"
+  fi
+
+  mkdir -p "$destination"
+
+  while IFS=$'\t' read -r name type url; do
+
+    case "$type" in
+
+    file)
+      info "Downloading $app/$name"
+
+      download "$url" >"$destination/$name"
+      ;;
+
+    dir)
+      download_app \
+        "$app/$name" \
+        "$destination/$name"
+      ;;
+
+    *)
+      error "unsupported GitHub item type '$type'"
+      ;;
+
+    esac
+
+  done < <(
+    jq -r '
+      .[]
+      | [
+          .name,
+          .type,
+          (.download_url // "")
+        ]
+      | @tsv
+    ' <<<"$contents"
+  )
+}
+
+# ------------------------------------------------------------
+# Catalog
+# ------------------------------------------------------------
+
+update_catalog() {
+  local temporary
+
+  temporary="$(mktemp)"
+
+  info "Updating application catalog..."
+
+  if ! github_apps >"$temporary"; then
+    rm -f "$temporary"
+    error "could not contact GitHub"
+  fi
+
+  if ! jq -e 'type == "array"' "$temporary" >/dev/null 2>&1; then
+    rm -f "$temporary"
+    error "GitHub returned an invalid catalog"
+  fi
+
+  jq '
+        [
+            .[]
+            | select(.type == "dir")
+            | .name
+        ]
+        | sort
+    ' "$temporary" >"$CATALOG"
+
+  rm -f "$temporary"
+
+  info "Catalog updated."
+}
+
+catalog_exists() {
+  [[ -f "$CATALOG" ]]
+}
+
+app_exists() {
+  local app="$1"
+
+  jq -e \
+    --arg app "$app" \
+    '.[] | select(. == $app)' \
+    "$CATALOG" >/dev/null
+}
+
+# ------------------------------------------------------------
+# Installed applications
+# ------------------------------------------------------------
+
+is_installed() {
+  local app="$1"
+
+  [[ -f "$INSTALLED" ]] &&
+    grep -Fxq "$app" "$INSTALLED"
+}
+
+mark_installed() {
+  local app="$1"
+
+  touch "$INSTALLED"
+
+  if ! is_installed "$app"; then
+    echo "$app" >>"$INSTALLED"
+  fi
+}
+
+mark_uninstalled() {
+  local app="$1"
+
+  [[ -f "$INSTALLED" ]] || return 0
+
+  grep -Fxv "$app" "$INSTALLED" >"$INSTALLED.tmp" || true
+  mv "$INSTALLED.tmp" "$INSTALLED"
+}
+
+# ------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------
+
+cmd_list() {
+
+  if ! catalog_exists; then
+    echo "MicroSH: catalog not found."
+    echo
+    echo "Run:"
+    echo
+    echo "  microsh update"
+    echo
+    exit 1
+  fi
+
+  echo
+  echo "MicroSH Apps"
+  echo "------------"
+
+  jq -r '.[] | "  " + .' "$CATALOG"
+
+  echo
+}
+
+cmd_update() {
+  update_catalog
+
+  echo
+  echo "Available applications:"
+  jq -r '.[] | "  " + .' "$CATALOG"
+  echo
+}
+
+cmd_install() {
+
+  local app="$1"
+  local app_dir
+  local installer
+  local temporary_dir
+
+  if ! catalog_exists; then
+    error "catalog not found. Run 'microsh update' first."
+  fi
+
+  if ! app_exists "$app"; then
+    error "application '$app' is not in the catalog"
+  fi
+
+  if is_installed "$app"; then
+    info "'$app' is already installed"
+    exit 0
+  fi
+
+  app_dir="$APP_DIR/$app"
+  temporary_dir="$(mktemp -d)"
+
+  info "Downloading '$app'..."
+
+  download_app "$app" "$temporary_dir"
+
+  installer="$temporary_dir/install.sh"
+
+  if [[ ! -f "$installer" ]]; then
+    rm -rf "$temporary_dir"
+    error "'$app' does not provide install.sh"
+  fi
+
+  chmod +x "$installer"
+
+  info "Installing '$app'..."
+
+  (
+    cd "$temporary_dir"
+    ./install.sh
+  )
+
+  # Installer succeeded.
+  # Keep everything except install.sh.
+  rm -f "$temporary_dir/install.sh"
+
+  rm -rf "$app_dir"
+  mv "$temporary_dir" "$app_dir"
+
+  mark_installed "$app"
+
+  info "'$app' installed."
+}
+
+cmd_uninstall() {
+
+  local app="$1"
+  local app_dir
+  local uninstaller
+
+  if ! is_installed "$app"; then
+    info "'$app' is not installed"
+    exit 0
+  fi
+
+  app_dir="$APP_DIR/$app"
+  uninstaller="$app_dir/uninstall.sh"
+
+  info "Uninstalling '$app'..."
+
+  if [[ ! -f "$uninstaller" ]]; then
+    error "'$app' does not provide uninstall.sh"
+  fi
+
+  chmod +x "$uninstaller"
+
+  (
+    cd "$app_dir"
+    ./uninstall.sh
+  )
+
+  rm -rf "$app_dir"
+
+  mark_uninstalled "$app"
+
+  info "'$app' uninstalled."
+}
+
+cmd_help() {
+
+  cat <<EOF
+
+MicroSH $VERSION
+
+Tiny Linux application manager.
+
+Usage:
+
+  microsh list
+      List applications from the local catalog.
+
+  microsh update
+      Update the local application catalog from GitHub.
+
+  microsh install <app>
+      Download and install an application.
+
+  microsh uninstall <app>
+      Uninstall an application.
+
+  microsh help
+      Show this help.
+
+Example:
+
+  microsh update
+  microsh list
+  microsh install todo
+  microsh uninstall todo
+
+EOF
+}
+
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
+
+check_dependencies
+
+COMMAND="${1:-help}"
+
+case "$COMMAND" in
+
+list)
+  cmd_list
+  ;;
+
+update)
+  cmd_update
+  ;;
+
+install)
+  [[ $# -eq 2 ]] ||
+    error "usage: microsh install <app>"
+
+  cmd_install "$2"
+  ;;
+
+uninstall)
+  [[ $# -eq 2 ]] ||
+    error "usage: microsh uninstall <app>"
+
+  cmd_uninstall "$2"
+  ;;
+
+help | -h | --help)
+  cmd_help
+  ;;
+
+version | -v | --version)
+  echo "MicroSH $VERSION"
+  ;;
+
+*)
+  error "unknown command '$COMMAND'. Run 'microsh help'."
+  ;;
+
+esac
