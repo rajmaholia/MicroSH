@@ -1,0 +1,582 @@
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="1.0.0"
+MICROSH_CATALOG_USER="rajmaholia"
+MICROSH_CATALOG_REPO="MicroSH-Catalog"
+MICROSH_CATALOG_BRANCH="main"
+MICROSH_CATALOG_URL="https://raw.githubusercontent.com/$MICROSH_CATALOG_USER/$MICROSH_CATALOG_REPO/$MICROSH_CATALOG_BRANCH/catalog.json"
+XDG_BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+MICROSH_DATA_DIR="$XDG_DATA_HOME/microsh"
+MICROSH_CACHE_DIR="$XDG_CACHE_HOME/microsh"
+MICROSH_APPS_DIR="${XDG_DATA_HOME:-$HOME}/microsh-apps"
+MICROSH_CATALOG="$MICROSH_CACHE_DIR/catalog.json"
+MICROSH_INSTALLED="$MICROSH_DATA_DIR/installed"
+MICROSH_METADATA_DIR="$MICROSH_DATA_DIR/metadata"
+INSTALLED="$MICROSH_DATA_DIR/installed"
+mkdir -p "$MICROSH_CACHE_DIR"
+mkdir -p "$MICROSH_DATA_DIR"
+mkdir -p "$MICROSH_APPS_DIR"
+mkdir -p $MICROSH_METADATA_DIR
+error_print(){
+printf '\033[31m%s\033[0m\n' "$*" >&2
+}
+error(){
+echo "MicroSH: error: $*" >&2
+exit 1
+}
+info(){
+echo "MicroSH: $*"
+}
+warning(){
+printf '\033[31m%s\033[0m\n' "$*"
+}
+require_command(){
+command -v "$1" >/dev/null 2>&1||error "required command '$1' is not installed"
+}
+check_dependencies(){
+require_command curl
+require_command jq
+require_command tar
+}
+download(){
+curl -fL --retry 3 --retry-delay 1 "$1"
+}
+verify_checksum(){
+local archive="$1"
+local expected="$2"
+[[ -z $expected ]]&&return 0
+require_command sha256sum
+local actual
+actual="$(sha256sum "$archive"|awk '{print $1}')"
+if [[ $actual != "$expected" ]];then
+error "SHA256 checksum verification failed"
+fi
+info "Checksum verified."
+}
+extract_archive(){
+local archive="$1"
+local destination="$2"
+case "$archive" in
+*.tar.gz|*.tgz)tar -xzf "$archive" -C "$destination"
+;;
+*.tar.bz2|*.tbz2)tar -xjf "$archive" -C "$destination"
+;;
+*.tar.xz|*.txz)tar -xJf "$archive" -C "$destination"
+;;
+*.tar)tar -xf "$archive" -C "$destination"
+;;
+*.zip)require_command unzip
+unzip -q "$archive" -d "$destination"
+;;
+*)error "unsupported package archive format: $archive"
+esac
+}
+download_catalog(){
+local temporary
+temporary="$(mktemp)"
+info "Updating MicroSH Catalog..."
+if ! download "$MICROSH_CATALOG_URL" >"$temporary";then
+rm -f "$temporary"
+error "could not download MicroSH catalog"
+fi
+if ! jq -e '
+        type == "object"
+        and (.["catalog-version"] | type == "number")
+        and (.apps | type == "object")
+      ' "$temporary" >/dev/null 2>&1;then
+rm -f "$temporary"
+error "downloaded catalog has an invalid format"
+fi
+mv "$temporary" "$MICROSH_CATALOG"
+info "Catalog updated."
+}
+catalog_exists(){
+[[ -f $MICROSH_CATALOG ]]
+}
+ensure_catalog(){
+if ! catalog_exists;then
+download_catalog
+fi
+}
+app_exists(){
+local app="$1"
+jq -e \
+--arg app "$app" \
+'.apps | has($app)' \
+"$MICROSH_CATALOG" >/dev/null
+}
+latest_version(){
+local app="$1"
+jq -r \
+--arg app "$app" \
+'.apps[$app].latest' \
+"$MICROSH_CATALOG"
+}
+version_exists(){
+local app="$1"
+local version="$2"
+jq -e \
+--arg app "$app" \
+--arg version "$version" \
+'.apps[$app].versions | has($version)' \
+"$MICROSH_CATALOG" >/dev/null
+}
+package_url(){
+local app="$1"
+local version="$2"
+jq -r \
+--arg app "$app" \
+--arg version "$version" \
+'.apps[$app].versions[$version].url' \
+"$MICROSH_CATALOG"
+}
+package_sha256(){
+local app="$1"
+local version="$2"
+jq -r \
+--arg app "$app" \
+--arg version "$version" \
+'.apps[$app].versions[$version].sha256 // empty' \
+"$MICROSH_CATALOG"
+}
+dependency_version_satisfies(){
+local version="$1"
+local specification="$2"
+[[ $specification == "*" ]]&&return 0
+case "$specification" in
+'>='*)dpkg --compare-versions \
+"$version" ge "${specification#>=}"
+;;
+'<='*)dpkg --compare-versions \
+"$version" le "${specification#<=}"
+;;
+'>'*)dpkg --compare-versions \
+"$version" gt "${specification#>}"
+;;
+'<'*)dpkg --compare-versions \
+"$version" lt "${specification#<}"
+;;
+*)dpkg --compare-versions \
+"$version" eq "$specification"
+esac
+}
+resolve_dependencies(){
+local package_root="$1"
+local manifest="$package_root/microsh.json"
+local dependency
+local specification
+local status
+local version
+local unresolved=false
+if [[ ! -f $manifest ]];then
+warning "package does not contain microsh.json"
+return 1
+fi
+if ! jq -e '
+        type == "object"
+        and (.dependencies // {} | type == "object")
+    ' "$manifest" >/dev/null 2>&1;then
+warning "invalid microsh.json: 'dependencies' must be an object"
+return 1
+fi
+while IFS=$'\t' read -r dependency specification;do
+[[ -n $dependency ]]||continue
+if ! IFS=$'\t' read -r status version < <(dpkg-query \
+-W \
+-f='${Status}\t${Version}\n' \
+"$dependency" 2>/dev/null);then
+warning "dependency '$dependency' is not installed"
+unresolved=true
+continue
+fi
+if [[ $status != "install ok installed" ]];then
+warning "dependency '$dependency' is not installed"
+unresolved=true
+continue
+fi
+if ! dependency_version_satisfies \
+"$version" \
+"$specification";then
+warning \
+"dependency '$dependency' version '$version' does not satisfy '$specification'"
+unresolved=true
+continue
+fi
+info \
+"dependency '$dependency' $version satisfies '$specification'"
+done < <(jq -r '
+            (.dependencies // {})
+            | to_entries[]
+            | [.key, .value]
+            | @tsv
+        ' "$manifest")
+if [[ $unresolved == true ]];then
+return 1
+fi
+return 0
+}
+installed_version(){
+local app="$1"
+local version
+[[ -f $MICROSH_INSTALLED ]]||return 1
+version="$(awk -v app="$app" '$1 == app { print $2; exit }' \
+"$MICROSH_INSTALLED")"
+[[ -n $version ]]||return 1
+printf '%s\n' "$version"
+return 0
+}
+is_installed(){
+local app="$1"
+installed_version "$app" >/dev/null
+}
+mark_installed(){
+local app="$1"
+local version="$2"
+touch "$MICROSH_INSTALLED"
+grep -v "^$app " "$MICROSH_INSTALLED" >"$MICROSH_INSTALLED.tmp"||true
+echo "$app $version" >>"$MICROSH_INSTALLED.tmp"
+mv "$MICROSH_INSTALLED.tmp" "$MICROSH_INSTALLED"
+}
+mark_uninstalled(){
+local app="$1"
+[[ -f $MICROSH_INSTALLED ]]||return 0
+grep -v "^$app " "$MICROSH_INSTALLED" >"$MICROSH_INSTALLED.tmp"||true
+mv "$MICROSH_INSTALLED.tmp" "$MICROSH_INSTALLED"
+}
+add_app_metadata(){
+local app="$1"
+local type="$2"
+local value="$3"
+local metadata
+metadata="$(get_app_metafile "$app")"
+[[ -f $metadata ]]||{
+error_print "metadata for '$app' does not exist"
+return 1
+}
+printf '%s=%s\n' "$type" "$value" >>"$metadata"
+}
+get_app_metafile(){
+local app=$1
+local full_path="$MICROSH_METADATA_DIR/$app"
+[[ -e $full_path ]]||touch "$full_path"
+printf "$full_path"
+}
+create_app_metafile(){
+local app="$1"
+local metafile="$MICROSH_METADATA_DIR/$app"
+[[ -f $metafile ]]&&{
+rm -f -- "$metafile"
+}
+touch "$metafile"
+}
+find_package_root(){
+local directory="$1"
+if [[ -f "$directory/microsh.json" ]];then
+echo "$directory"
+return 0
+fi
+local entries=()
+while IFS= read -r -d '' entry;do
+entries+=("$entry")
+done < <(find "$directory" -mindepth 1 -maxdepth 1 -print0)
+if [[ ${#entries[@]} -eq 1 ]]&&[[ -d ${entries[0]} ]]&&[[ -f "${entries[0]}/microsh.json" ]];then
+echo "${entries[0]}"
+return 0
+fi
+return 1
+}
+install_app(){
+local app="$1"
+local app_version="$2"
+local package_root="$3"
+local microsh_apps_dir="$4"
+local bin_home="$5"
+local app_dir="$microsh_apps_dir/$app"
+local -a exec_links
+[[ -e $app_dir ]]&&{
+rm -rf "$app_dir"
+}
+if ! cp -a "$package_root/$app" "$app_dir";then
+rm -rf "$app_dir"
+error_print "could not write the package '$app' to disk."
+return 1
+fi
+if ! create_exec_links "$package_root" "$app" exec_links;then
+rm -rf "$app_dir"
+error_print "could not create executable links for '$app'"
+return 1
+fi
+create_app_metafile "$app"
+add_app_metadata "$app" "version" "$app_version"
+for link in "${exec_links[@]}";do
+add_app_metadata "$app" "link" "$link"
+done
+add_app_metadata "$app" "app" "$app_dir"
+mark_installed "$app" "$version"
+}
+uninstall_app(){
+local app="$1"
+local microsh_metadata_dir="$2"
+local metafile="$microsh_metadata_dir/$app"
+[[ -e $metafile && -f $metafile ]]||{
+error_print "App Installation metadata is missing."
+return 1
+}
+while IFS='=' read -r type path;do
+case "$type" in
+link)rm -- "$path"
+;;
+app)rm -rf -- "$path"
+esac
+done <"$metafile"
+rm -- "$metafile"
+mark_uninstalled "$app"
+}
+create_exec_links(){
+local package_root="$1"
+local app="$2"
+local -n exec_links_array="$3"
+local manifest="$package_root/microsh.json"
+local app_dir="$MICROSH_APPS_DIR/$app"
+local bin_dir="$XDG_BIN_HOME"
+local name
+local relative_path
+local target
+local link
+local app_exec_path
+exec_links_array=()
+mkdir -p "$bin_dir"
+while IFS=$'\t' read -r name relative_path;do
+[[ -n $name ]]||continue
+app_exec_path="${relative_path#*/}"
+target="$app_dir/$app_exec_path"
+link="$bin_dir/$name"
+if [[ ! -e $target && ! -L $target ]];then
+warning \
+"exec target '$app_exec_path' does not exist for '$app'"
+rm -f -- "${exec_links_array[@]}"
+exec_links_array=()
+return 1
+fi
+if [[ -e $link || -L $link ]];then
+rm "$link"
+fi
+if ! ln -s "$target" "$link";then
+warning \
+"could not create executable link '$link'"
+rm -f -- "${exec_links_array[@]}"
+exec_links_array=()
+return 1
+fi
+exec_links_array+=("$link")
+info "Created executable link '$name'"
+done < <(jq -r '
+            (.exec // {})
+            | to_entries[]
+            | [.key, .value]
+            | @tsv
+        ' "$manifest")
+return 0
+}
+check_bin_path(){
+local bin_dir="$XDG_BIN_HOME"
+case ":$PATH:" in
+*":$bin_dir:"*)info "'$bin_dir' is in PATH."
+return 0
+esac
+warning "'$bin_dir' is not in PATH."
+echo
+echo "Add it to PATH with:"
+echo
+echo '  export PATH="$HOME/.local/bin:$PATH"'
+echo
+echo "To make it permanent, add the same line to your shell"
+echo "startup configuration (for example ~/.bashrc)."
+echo
+return 0
+}
+cmd_list(){
+ensure_catalog
+echo
+echo "MicroSH Apps"
+echo "------------"
+jq -r '
+    .apps
+    | to_entries[]
+    | "  \(.key)  \(.value.latest)"
+  ' "$MICROSH_CATALOG"
+echo
+}
+cmd_update(){
+download_catalog
+echo
+echo "Available applications:"
+jq -r '
+    .apps
+    | to_entries[]
+    | "  \(.key)  \(.value.latest)"
+  ' "$MICROSH_CATALOG"
+echo
+}
+cmd_install(){
+local specification="$1"
+local app
+local version
+local latest
+local url
+local checksum
+local temporary_dir
+local archive
+local package_root
+local app_dir
+local installer_json
+if [[ $specification == *@* ]];then
+app="${specification%@*}"
+version="${specification##*@}"
+[[ -n $app ]]||error "invalid application name"
+[[ -n $version ]]||error "invalid version"
+else
+app="$specification"
+version=""
+fi
+ensure_catalog
+if ! app_exists "$app";then
+error "application '$app' is not in the microsh catalog"
+fi
+if [[ -z $version ]];then
+version="$(latest_version "$app")"
+[[ -n $version ]]||error "no latest version is defined for '$app'"
+else
+if ! version_exists "$app" "$version";then
+error "version '$version' of '$app' is not available"
+fi
+fi
+url="$(package_url "$app" "$version")"
+[[ -n $url ]]||error "no package URL is defined for '$app' version '$version'"
+checksum="$(package_sha256 "$app" "$version")"
+if is_installed "$app";then
+local current_version
+current_version="$(installed_version "$app")"
+if [[ $current_version == "$version" ]];then
+info "'$app' $version is already installed"
+exit 0
+fi
+info "'$app' $current_version is installed."
+info "Replacing it with '$app' $version..."
+uninstall_app "$app" "$MICROSH_METADATA_DIR"
+fi
+temporary_dir="$(mktemp -d)"
+archive="$temporary_dir/$(basename "${url%%\?*}")"
+info "Downloading '$app' $version $url"
+if ! download "$url" >"$archive";then
+rm -rf "$temporary_dir"
+error "could not download '$app' $version"
+fi
+verify_checksum "$archive" "$checksum"
+info "Extracting '$app' $version..."
+mkdir -p "$temporary_dir/extracted"
+extract_archive \
+"$archive" \
+"$temporary_dir/extracted"
+package_root="$(find_package_root "$temporary_dir/extracted")"||{
+rm -rf "$temporary_dir"
+error "'$app' package does not contain microsh.json"
+}
+if ! resolve_dependencies "$package_root";then
+rm -rf "$temporary_dir"
+error "dependency requirements are not satisfied"
+fi
+if ! install_app "$app" "$version" "$package_root" "$MICROSH_APPS_DIR" "$XDG_BIN_HOME";then
+rm -rf "$temporary_dir"
+exit 1
+fi
+check_bin_path
+info "'$app' $version installed."
+rm -rf -- "$temporary_dir"
+}
+cmd_uninstall(){
+local app="$1"
+ensure_catalog
+if ! is_installed "$app";then
+info "'$app' is not installed"
+exit 0
+fi
+uninstall_app "$app" "$MICROSH_METADATA_DIR"
+info "'$app' uninstalled."
+}
+cmd_help(){
+show_help
+}
+show_help(){
+cat <<EOF
+
+MicroSH $VERSION
+
+Tiny Linux application manager.
+
+Usage:
+
+  microsh list
+      List applications and their latest versions.
+
+  microsh update
+      Update the local application catalog.
+
+  microsh install <app>
+      Install the latest version of an application.
+
+  microsh install <app>@<version>
+      Install a specific available version.
+
+  microsh uninstall <app>
+      Uninstall an application.
+
+  microsh help
+      Show this help.
+
+  microsh version
+      Show MicroSH version.
+
+Examples:
+
+  microsh update
+
+  microsh list
+
+  microsh install Qnote
+
+  microsh install Qnote@1.5.0
+
+  microsh uninstall Qnote
+
+EOF
+}
+main(){
+check_dependencies
+local command="${1:-help}"
+case "$command" in
+list)[[ $# -eq 1 ]]||error "usage: microsh list"
+cmd_list
+;;
+update)[[ $# -eq 1 ]]||error "usage: microsh update"
+cmd_update
+;;
+install)[[ $# -eq 2 ]]||error "usage: microsh install <app>[@<version>]"
+cmd_install "$2"
+;;
+uninstall)[[ $# -eq 2 ]]||error "usage: microsh uninstall <app>"
+cmd_uninstall "$2"
+;;
+help|-h|--help)[[ $# -eq 1 ]]||error "usage: microsh help"
+cmd_help
+;;
+version|-v|--version)[[ $# -eq 1 ]]||error "usage: microsh version"
+echo "MicroSH $VERSION"
+;;
+*)error "unknown command '$command'. Run 'microsh help'."
+esac
+}
+main "$@"
