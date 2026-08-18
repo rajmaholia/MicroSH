@@ -99,7 +99,7 @@ uninstall_app() {
   while IFS='=' read -r type path; do
     case "$type" in
     link)
-      rm -- "$path"
+      rm -f -- "$path"
       ;;
     app)
       rm -rf -- "$path"
@@ -107,9 +107,10 @@ uninstall_app() {
     esac
   done <"$metafile"
 
-  rm -- "$metafile"
+  rm -f -- "$metafile"
 
   mark_uninstalled "$app"
+  hash -r
 }
 
 #----- ADD entry poins as symlinks
@@ -200,7 +201,6 @@ check_bin_path() {
 
   case ":$PATH:" in
   *":$bin_dir:"*)
-    info "'$bin_dir' is in PATH."
     return 0
     ;;
   esac
