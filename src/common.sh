@@ -1,18 +1,45 @@
-error_print() {
-  printf '\033[31m%s\033[0m\n' "$*" >&2
-}
-
 error() {
-  echo "MicroSH: error: $*" >&2
+  local prefix="${2:-}"
+  if [[ -n "$prefix" ]]; then
+    error_print "$1" "$prefix"
+  else
+    error_print "$1"
+  fi
   exit 1
 }
 
 info() {
-  echo "MicroSH: $*"
+  local message="$1"
+  local prefix="${2:-}"
+
+  if [[ -n "$prefix" ]]; then
+    printf '[%s] %s\n' "$prefix" "$message"
+  else
+    printf '%s\n' "$message"
+  fi
 }
 
 warning() {
-  printf '\033[31m%s\033[0m\n' "$*"
+  local message="$1"
+  local prefix="${2:-}"
+
+  if [[ -n "$prefix" ]]; then
+    printf '\e[33m[%s] %s\e[0m \n' "$prefix" "$message"
+  else
+    printf '\e[33m%s\e[0m\n' "$message"
+  fi
+}
+
+error_print() {
+  local message="$1"
+  local prefix="${2:-}"
+
+  if [[ -n "$prefix" ]]; then
+    printf '\e[31m[%s] %s\e[0m\n' "$prefix" "$message" || return 0
+  else
+    printf '\e[31m%s\e[0m\n' "$message" || return 0
+  fi
+  return 0
 }
 
 require_command() {
@@ -47,6 +74,10 @@ verify_checksum() {
   fi
 
   info "Checksum verified."
+}
+
+is_archive() {
+  [[ "$1" =~ \.(tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz|tar|zip)$ ]]
 }
 
 extract_archive() {

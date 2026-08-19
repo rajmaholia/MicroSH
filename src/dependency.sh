@@ -68,7 +68,7 @@ resolve_dependencies() {
   # ----------------------------------------------------------
   # Check each dependency
   # ----------------------------------------------------------
-
+  info "Checking dependencies ..."
   while IFS=$'\t' read -r dependency specification; do
 
     [[ -n "$dependency" ]] || continue
@@ -80,7 +80,7 @@ resolve_dependencies() {
         -f='${Status}\t${Version}\n' \
         "$dependency" 2>/dev/null
     ); then
-      warning "dependency '$dependency' is not installed"
+      warning "'$dependency' is not installed" "✘"
       unresolved=true
       continue
     fi
@@ -88,7 +88,7 @@ resolve_dependencies() {
     # Package may exist in dpkg's database without actually
     # being installed (e.g. config-files state).
     if [[ "$status" != "install ok installed" ]]; then
-      warning "dependency '$dependency' is not installed"
+      warning "'$dependency' is not installed" "✘"
       unresolved=true
       continue
     fi
@@ -99,14 +99,14 @@ resolve_dependencies() {
       "$specification"; then
 
       warning \
-        "dependency '$dependency' version '$version' does not satisfy '$specification'"
+        "'$dependency' '$version' ('$specification')" "✘"
 
       unresolved=true
       continue
     fi
 
     info \
-      "dependency '$dependency' $version satisfies '$specification'"
+      "'$dependency' $version ('$specification')" "✔"
 
   done < <(
     jq -r '

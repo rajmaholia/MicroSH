@@ -12,5 +12,6 @@ source "$SRC_DIR/package.sh"
 source "$SRC_DIR/command.sh"
 source "$SRC_DIR/help.sh"
 source "$SRC_DIR/main.sh"
+source "$SRC_DIR/validate_manifest.sh"
 
 main "$@"

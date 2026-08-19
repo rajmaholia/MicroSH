@@ -7,6 +7,7 @@ SRC_DIR="$ROOT_DIR/src"
 DIST_DIR="$ROOT_DIR/dist"
 
 OUTPUT="$DIST_DIR/microsh"
+OUTPUT_CHECKSUM="$DIST_DIR/microsh.sha256"
 TEMP="$DIST_DIR/.microsh.tmp"
 
 mkdir -p "$DIST_DIR"
@@ -23,6 +24,7 @@ mkdir -p "$DIST_DIR"
     "$SRC_DIR/dependency.sh" \
     "$SRC_DIR/metadata.sh" \
     "$SRC_DIR/package.sh" \
+    "$SRC_DIR/validate_manifest.sh" \
     "$SRC_DIR/command.sh" \
     "$SRC_DIR/help.sh" \
     "$SRC_DIR/main.sh"
@@ -45,5 +47,7 @@ mv "$TEMP.min" "$OUTPUT"
 rm -f "$TEMP"
 
 chmod 555 "$OUTPUT"
+
+sha256sum "$OUTPUT" >"$OUTPUT_CHECKSUM"
 
 printf 'Built: %s\n' "$OUTPUT"

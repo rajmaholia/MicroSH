@@ -2,7 +2,7 @@
 # Global variables
 # ------------------------------------------------------------
 # Version
-VERSION="1.0.0"
+VERSION="2.0.0"
 
 # Microsh Catalog
 MICROSH_CATALOG_USER="rajmaholia"

@@ -1,52 +1,168 @@
-###############################
-# Determine the root in downloaded archive
-# #############################
-find_package_root() {
-  local directory="$1"
-
-  # Normal package layout:
-  #
-  # package/
-  # ├── install.sh
-  # └── ...
-
-  if [[ -f "$directory/microsh.json" ]]; then
-    echo "$directory"
-    return 0
-  fi
-
-  # Also support archives containing one top-level directory:
-  #
-  # package/
-  #   Qnote/
-  #     install.sh
-
-  local entries=()
-
-  while IFS= read -r -d '' entry; do
-    entries+=("$entry")
-  done < <(find "$directory" -mindepth 1 -maxdepth 1 -print0)
-
-  if [[ "${#entries[@]}" -eq 1 ]] &&
-    [[ -d "${entries[0]}" ]] &&
-    [[ -f "${entries[0]}/microsh.json" ]]; then
-
-    echo "${entries[0]}"
-    return 0
-  fi
-
-  return 1
-}
-
 #############################################################
 # Installation
 # ###########################################################
+install_from_remote() {
+  local specification="$1"
+  local app
+  local version
+  local latest
+  local url
+  local checksum
+  local temporary_dir
+  local temp_archive
+
+  if [[ "$specification" == *@* ]]; then
+    app="${specification%@*}"
+    version="${specification##*@}"
+
+    [[ -n "$app" ]] ||
+      error "invalid application name"
+
+    [[ -n "$version" ]] ||
+      error "invalid version"
+
+  else
+    app="$specification"
+    version=""
+  fi
+
+  ensure_catalog
+
+  if ! app_exists "$app"; then
+    error "application '$app' is not in the microsh catalog"
+  fi
+
+  # ----------------------------------------------------------
+  # Select version
+  # ----------------------------------------------------------
+
+  if [[ -z "$version" ]]; then
+    version="$(latest_version "$app")"
+
+    [[ -n "$version" ]] ||
+      error "no latest version is defined for '$app'"
+  else
+    if ! version_exists "$app" "$version"; then
+      error "version '$version' of '$app' is not available"
+    fi
+  fi
+
+  url="$(package_url "$app" "$version")"
+
+  [[ -n "$url" ]] ||
+    error "no package URL is defined for '$app' version '$version'"
+
+  checksum="$(package_sha256 "$app" "$version")"
+
+  # ----------------------------------------------------------
+  # Already installed?
+  #
+  # install Qnote
+  # install Qnote@1.5.0
+  #
+  # Both replace the existing installation.
+  # ----------------------------------------------------------
+
+  if is_installed "$app"; then
+    local current_version="$(installed_version "$app")"
+
+    if [[ "$current_version" == "$version" ]]; then
+      info "'$app' $version is already installed"
+      exit 0
+    fi
+
+    info "'$app' $current_version is installed."
+    info "Replacing it with '$app' $version..."
+
+    uninstall_app "$app" "$MICROSH_METADATA_DIR"
+  fi
+
+  # ----------------------------------------------------------
+  # Download
+  # ----------------------------------------------------------
+
+  temporary_dir="$(mktemp -d)"
+
+  temp_archive="$temporary_dir/$(basename "${url%%\?*}")"
+
+  # Download the app package
+  info "Downloading $url ..."
+  if ! download "$url" >"$temp_archive"; then
+    rm -rf "$temporary_dir"
+    error "Download failed."
+  fi
+
+  # Verify checksum
+  verify_checksum "$temp_archive" "$checksum"
+  install_from_archive "$temp_archive" || {
+    rm -rf -- "$temporary_dir"
+    return 1
+  }
+  rm -rf -- "$temporary_dir"
+}
+
+install_from_archive() {
+  local archive="$1"
+  local temporary_dir="$(mktemp -d)"
+  local archive_basename="$(basename "$archive")"
+  # extract
+  info "Extracting $archive_basename ..."
+
+  extract_archive "$archive" "$temporary_dir" || {
+    rm -rf -- "$temporary_dir"
+    error_print "Extraction failed." && return 1
+  }
+
+  install_from_package "$temporary_dir" || {
+    rm -rf -- "$temporary_dir"
+    error_print "Installation failed." && return 1
+  }
+  rm -rf -- "$temporary_dir"
+}
+
+install_from_package() {
+  local package="$1"
+  local package_root package_payload manifest
+  local id name version
+
+  # find package root
+  package_root="$(
+    find_package_root "$package"
+  )" || {
+    error_print "Package does not contain microsh.json" && return 1
+  }
+
+  manifest="$package_root/microsh.json"
+  if ! validate_manifest "$manifest"; then
+    error_print "Invalid microsh.json." && return 1
+  fi
+  package_payload="$(get_package_payload "$package_root")" || {
+    error_print "Package must contain exactly one payload directory" && return 1
+  }
+
+  read -r id name version < <(
+    jq -r '[.id, .name, .version] | @tsv' "$manifest"
+  ) || {
+    error_print "Unable to read essential data from microsh.json."
+  }
+  #dependency resolve
+  if ! resolve_dependencies "$package_root"; then
+    error_print "Dependency requirements are not satisfied" && return 1
+  fi
+
+  # installation and setup on disk
+  if ! install_app "$id" "$version" "$package_root" "$package_payload" "$MICROSH_APPS_DIR" "$XDG_BIN_HOME"; then
+    return 1
+  fi
+}
+
 install_app() {
   local app="$1"
   local app_version="$2"
-  local package_root="$3" # temporary file
-  local microsh_apps_dir="$4"
-  local bin_home="$5"
+  local package_root="$3"
+  local package_payload="$4"
+  local microsh_apps_dir="$5"
+  local bin_home="$6"
 
   local app_dir="$microsh_apps_dir/$app"
   local -a exec_links
@@ -56,31 +172,32 @@ install_app() {
     rm -rf "$app_dir"
   }
 
-  if ! cp -a "$package_root/$app" "$app_dir"; then
+  if ! cp -a "$package_payload" "$app_dir"; then
     rm -rf "$app_dir"
-    error_print "could not write the package '$app' to disk."
-    return 1
+    error_print "Could not write the package '$app' to disk." && return 1
   fi
 
   # Create links
   if ! create_exec_links "$package_root" "$app" exec_links; then
     rm -rf "$app_dir"
-    error_print "could not create executable links for '$app'"
-    return 1
+    error_print "Could not create executable links for '$app'" && return 1
   fi
 
-  # Register in microsh.
-  create_app_metafile "$app"
+  ###### Register in microsh.
 
+  create_app_metafile "$app"
   add_app_metadata "$app" "version" "$app_version"
 
+  # Register exectable symlinks
   for link in "${exec_links[@]}"; do
     add_app_metadata "$app" "link" "$link"
   done
-
+  # Register installation dir
   add_app_metadata "$app" "app" "$app_dir"
 
   mark_installed "$app" "$version"
+
+  info "'$app' $app_version installed."
 }
 
 ###################################################
@@ -113,7 +230,10 @@ uninstall_app() {
   hash -r
 }
 
-#----- ADD entry poins as symlinks
+#################################################
+# Installation Helpers
+# ###############################################
+
 create_exec_links() {
   local package_root="$1"
   local app="$2"
@@ -133,6 +253,7 @@ create_exec_links() {
 
   mkdir -p "$bin_dir"
 
+  info "Creating exectable links..."
   while IFS=$'\t' read -r name relative_path; do
 
     [[ -n "$name" ]] || continue
@@ -182,7 +303,7 @@ create_exec_links() {
 
     exec_links_array+=("$link")
 
-    info "Created executable link '$name'"
+    info "$name" "*"
 
   done < <(
     jq -r '
@@ -217,4 +338,56 @@ check_bin_path() {
   echo
 
   return 0
+}
+
+###############################
+# Determine the root in downloaded archive
+# #############################
+find_package_root() {
+  local directory="$1"
+
+  # Normal package layout:
+  #
+  # package/
+  # ├── install.sh
+  # └── ...
+
+  if [[ -f "$directory/microsh.json" ]]; then
+    echo "$directory"
+    return 0
+  fi
+
+  # Also support archives containing one top-level directory:
+  #
+  # package/
+  #   Qnote/
+  #     install.sh
+
+  local entries=()
+
+  while IFS= read -r -d '' entry; do
+    entries+=("$entry")
+  done < <(find "$directory" -mindepth 1 -maxdepth 1 -print0)
+
+  if [[ "${#entries[@]}" -eq 1 ]] &&
+    [[ -d "${entries[0]}" ]] &&
+    [[ -f "${entries[0]}/microsh.json" ]]; then
+
+    echo "${entries[0]}"
+    return 0
+  fi
+
+  return 1
+}
+
+get_package_payload() {
+  local root="$1"
+  local dir
+  local count
+
+  count="$(find "$root" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | wc -l)"
+  [[ "$count" -eq 1 ]] || return 1
+
+  dir="$(find "$root" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print -quit)"
+  printf '%s\n' "$dir"
 }
