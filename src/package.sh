@@ -140,16 +140,14 @@ install_from_package() {
     error_print "Package must contain exactly one payload directory" && return 1
   }
 
-  read -r id name version < <(
-    jq -r '[.id, .name, .version] | @tsv' "$manifest"
-  ) || {
-    error_print "Unable to read essential data from microsh.json."
-  }
+	id="$(jq -r '.id' "$manifest")"
+	name="$(jq -r '.name' "$manifest")"
+	version="$(jq -r '.version' "$manifest")"
+
   #dependency resolve
   if ! resolve_dependencies "$package_root"; then
     error_print "Dependency requirements are not satisfied" && return 1
   fi
-
   # installation and setup on disk
   if ! install_app "$id" "$version" "$package_root" "$package_payload" "$MICROSH_APPS_DIR" "$XDG_BIN_HOME"; then
     return 1
@@ -157,14 +155,14 @@ install_from_package() {
 }
 
 install_app() {
-  local app="$1"
+  local app_id="$1"
   local app_version="$2"
   local package_root="$3"
   local package_payload="$4"
   local microsh_apps_dir="$5"
   local bin_home="$6"
 
-  local app_dir="$microsh_apps_dir/$app"
+  local app_dir="$microsh_apps_dir/$app_id"
   local -a exec_links
 
   # write app
@@ -174,30 +172,30 @@ install_app() {
 
   if ! cp -a "$package_payload" "$app_dir"; then
     rm -rf "$app_dir"
-    error_print "Could not write the package '$app' to disk." && return 1
+    error_print "Could not write the package '$app_id' to disk." && return 1
   fi
 
   # Create links
-  if ! create_exec_links "$package_root" "$app" exec_links; then
+  if ! create_exec_links "$package_root" "$app_id" exec_links; then
     rm -rf "$app_dir"
-    error_print "Could not create executable links for '$app'" && return 1
+    error_print "Could not create executable links for '$app_id'" && return 1
   fi
 
   ###### Register in microsh.
 
-  create_app_metafile "$app"
-  add_app_metadata "$app" "version" "$app_version"
+  create_app_metafile "$app_id"
+  add_app_metadata "$app_id" "version" "$app_version"
 
   # Register exectable symlinks
   for link in "${exec_links[@]}"; do
-    add_app_metadata "$app" "link" "$link"
+    add_app_metadata "$app_id" "link" "$link"
   done
   # Register installation dir
-  add_app_metadata "$app" "app" "$app_dir"
+  add_app_metadata "$app_id" "app" "$app_dir"
 
-  mark_installed "$app" "$version"
+  mark_installed "$app_id" "$app_version"
 
-  info "'$app' $app_version installed."
+  info "'$app_id' $app_version installed."
 }
 
 ###################################################
