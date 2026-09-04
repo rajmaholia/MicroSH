@@ -50,6 +50,10 @@ main() {
     echo "MicroSH $VERSION"
     ;;
 
+  self-update)
+    cmd_selfupdate "${@:2}"
+    ;;
+
   *)
     error "unknown command '$command'. Run 'microsh help'."
     ;;

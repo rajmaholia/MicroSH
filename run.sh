@@ -13,5 +13,6 @@ source "$SRC_DIR/command.sh"
 source "$SRC_DIR/help.sh"
 source "$SRC_DIR/main.sh"
 source "$SRC_DIR/validate_manifest.sh"
+source "$SRC_DIR/selfupdate.sh"
 
 main "$@"

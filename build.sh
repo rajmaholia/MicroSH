@@ -25,6 +25,7 @@ mkdir -p "$DIST_DIR"
     "$SRC_DIR/metadata.sh" \
     "$SRC_DIR/package.sh" \
     "$SRC_DIR/validate_manifest.sh" \
+    "$SRC_DIR/selfupdate.sh" \
     "$SRC_DIR/command.sh" \
     "$SRC_DIR/help.sh" \
     "$SRC_DIR/main.sh"
@@ -47,7 +48,6 @@ mv "$TEMP.min" "$OUTPUT"
 rm -f "$TEMP"
 
 chmod 555 "$OUTPUT"
-
-sha256sum "$OUTPUT" >"$OUTPUT_CHECKSUM"
+sha256sum "$OUTPUT" | awk '{print $1}' >"$OUTPUT_CHECKSUM"
 
 printf 'Built: %s\n' "$OUTPUT"

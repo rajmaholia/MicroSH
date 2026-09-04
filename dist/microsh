@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-VERSION="2.0.1"
+VERSION="1.0.0"
 MICROSH_CATALOG_USER="rajmaholia"
 MICROSH_CATALOG_REPO="MicroSH-Catalog"
 MICROSH_CATALOG_BRANCH="main"
@@ -20,42 +20,18 @@ mkdir -p "$MICROSH_CACHE_DIR"
 mkdir -p "$MICROSH_DATA_DIR"
 mkdir -p "$MICROSH_APPS_DIR"
 mkdir -p $MICROSH_METADATA_DIR
+error_print(){
+printf '\033[31m%s\033[0m\n' "$*" >&2
+}
 error(){
-local prefix="${2:-}"
-if [[ -n $prefix ]];then
-error_print "$1" "$prefix"
-else
-error_print "$1"
-fi
+echo "MicroSH: error: $*" >&2
 exit 1
 }
 info(){
-local message="$1"
-local prefix="${2:-}"
-if [[ -n $prefix ]];then
-printf '[%s] %s\n' "$prefix" "$message"
-else
-printf '%s\n' "$message"
-fi
+echo "MicroSH: $*"
 }
 warning(){
-local message="$1"
-local prefix="${2:-}"
-if [[ -n $prefix ]];then
-printf '\e[33m[%s] %s\e[0m \n' "$prefix" "$message"
-else
-printf '\e[33m%s\e[0m\n' "$message"
-fi
-}
-error_print(){
-local message="$1"
-local prefix="${2:-}"
-if [[ -n $prefix ]];then
-printf '\e[31m[%s] %s\e[0m\n' "$prefix" "$message"||return 0
-else
-printf '\e[31m%s\e[0m\n' "$message"||return 0
-fi
-return 0
+printf '\033[31m%s\033[0m\n' "$*"
 }
 require_command(){
 command -v "$1" >/dev/null 2>&1||error "required command '$1' is not installed"
@@ -79,9 +55,6 @@ if [[ $actual != "$expected" ]];then
 error "SHA256 checksum verification failed"
 fi
 info "Checksum verified."
-}
-is_archive(){
-[[ $1 =~ \.(tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz|tar|zip)$ ]]
 }
 extract_archive(){
 local archive="$1"
@@ -209,19 +182,18 @@ if ! jq -e '
 warning "invalid microsh.json: 'dependencies' must be an object"
 return 1
 fi
-info "Checking dependencies ..."
 while IFS=$'\t' read -r dependency specification;do
 [[ -n $dependency ]]||continue
 if ! IFS=$'\t' read -r status version < <(dpkg-query \
 -W \
 -f='${Status}\t${Version}\n' \
 "$dependency" 2>/dev/null);then
-warning "'$dependency' is not installed" "✘"
+warning "dependency '$dependency' is not installed"
 unresolved=true
 continue
 fi
 if [[ $status != "install ok installed" ]];then
-warning "'$dependency' is not installed" "✘"
+warning "dependency '$dependency' is not installed"
 unresolved=true
 continue
 fi
@@ -229,12 +201,12 @@ if ! dependency_version_satisfies \
 "$version" \
 "$specification";then
 warning \
-"'$dependency' '$version' ('$specification')" "✘"
+"dependency '$dependency' version '$version' does not satisfy '$specification'"
 unresolved=true
 continue
 fi
 info \
-"'$dependency' $version ('$specification')" "✔"
+"dependency '$dependency' $version satisfies '$specification'"
 done < <(jq -r '
             (.dependencies // {})
             | to_entries[]
@@ -300,130 +272,50 @@ rm -f -- "$metafile"
 }
 touch "$metafile"
 }
-install_from_remote(){
-local specification="$1"
-local app
-local version
-local latest
-local url
-local checksum
-local temporary_dir
-local temp_archive
-if [[ $specification == *@* ]];then
-app="${specification%@*}"
-version="${specification##*@}"
-[[ -n $app ]]||error "invalid application name"
-[[ -n $version ]]||error "invalid version"
-else
-app="$specification"
-version=""
+find_package_root(){
+local directory="$1"
+if [[ -f "$directory/microsh.json" ]];then
+echo "$directory"
+return 0
 fi
-ensure_catalog
-if ! app_exists "$app";then
-error "application '$app' is not in the microsh catalog"
+local entries=()
+while IFS= read -r -d '' entry;do
+entries+=("$entry")
+done < <(find "$directory" -mindepth 1 -maxdepth 1 -print0)
+if [[ ${#entries[@]} -eq 1 ]]&&[[ -d ${entries[0]} ]]&&[[ -f "${entries[0]}/microsh.json" ]];then
+echo "${entries[0]}"
+return 0
 fi
-if [[ -z $version ]];then
-version="$(latest_version "$app")"
-[[ -n $version ]]||error "no latest version is defined for '$app'"
-else
-if ! version_exists "$app" "$version";then
-error "version '$version' of '$app' is not available"
-fi
-fi
-url="$(package_url "$app" "$version")"
-[[ -n $url ]]||error "no package URL is defined for '$app' version '$version'"
-checksum="$(package_sha256 "$app" "$version")"
-if is_installed "$app";then
-local current_version="$(installed_version "$app")"
-if [[ $current_version == "$version" ]];then
-info "'$app' $version is already installed"
-exit 0
-fi
-info "'$app' $current_version is installed."
-info "Replacing it with '$app' $version..."
-uninstall_app "$app" "$MICROSH_METADATA_DIR"
-fi
-temporary_dir="$(mktemp -d)"
-temp_archive="$temporary_dir/$(basename "${url%%\?*}")"
-info "Downloading $url ..."
-if ! download "$url" >"$temp_archive";then
-rm -rf "$temporary_dir"
-error "Download failed."
-fi
-verify_checksum "$temp_archive" "$checksum"
-install_from_archive "$temp_archive"||{
-rm -rf -- "$temporary_dir"
 return 1
-}
-rm -rf -- "$temporary_dir"
-}
-install_from_archive(){
-local archive="$1"
-local temporary_dir="$(mktemp -d)"
-local archive_basename="$(basename "$archive")"
-info "Extracting $archive_basename ..."
-extract_archive "$archive" "$temporary_dir"||{
-rm -rf -- "$temporary_dir"
-error_print "Extraction failed."&&return 1
-}
-install_from_package "$temporary_dir"||{
-rm -rf -- "$temporary_dir"
-error_print "Installation failed."&&return 1
-}
-rm -rf -- "$temporary_dir"
-}
-install_from_package(){
-local package="$1"
-local package_root package_payload manifest
-local id name version
-package_root="$(find_package_root "$package")"||{
-error_print "Package does not contain microsh.json"&&return 1
-}
-manifest="$package_root/microsh.json"
-if ! validate_manifest "$manifest";then
-error_print "Invalid microsh.json."&&return 1
-fi
-package_payload="$(get_package_payload "$package_root")"||{
-error_print "Package must contain exactly one payload directory"&&return 1
-}
-id="$(jq -r '.id' "$manifest")"
-name="$(jq -r '.name' "$manifest")"
-version="$(jq -r '.version' "$manifest")"
-if ! resolve_dependencies "$package_root";then
-error_print "Dependency requirements are not satisfied"&&return 1
-fi
-if ! install_app "$id" "$version" "$package_root" "$package_payload" "$MICROSH_APPS_DIR" "$XDG_BIN_HOME";then
-return 1
-fi
 }
 install_app(){
-local app_id="$1"
+local app="$1"
 local app_version="$2"
 local package_root="$3"
-local package_payload="$4"
-local microsh_apps_dir="$5"
-local bin_home="$6"
-local app_dir="$microsh_apps_dir/$app_id"
+local microsh_apps_dir="$4"
+local bin_home="$5"
+local app_dir="$microsh_apps_dir/$app"
 local -a exec_links
 [[ -e $app_dir ]]&&{
 rm -rf "$app_dir"
 }
-if ! cp -a "$package_payload" "$app_dir";then
+if ! cp -a "$package_root/$app" "$app_dir";then
 rm -rf "$app_dir"
-error_print "Could not write the package '$app_id' to disk."&&return 1
+error_print "could not write the package '$app' to disk."
+return 1
 fi
-if ! create_exec_links "$package_root" "$app_id" exec_links;then
+if ! create_exec_links "$package_root" "$app" exec_links;then
 rm -rf "$app_dir"
-error_print "Could not create executable links for '$app_id'"&&return 1
+error_print "could not create executable links for '$app'"
+return 1
 fi
-create_app_metafile "$app_id"
-add_app_metadata "$app_id" "version" "$app_version"
+create_app_metafile "$app"
+add_app_metadata "$app" "version" "$app_version"
 for link in "${exec_links[@]}";do
-add_app_metadata "$app_id" "link" "$link"
+add_app_metadata "$app" "link" "$link"
 done
-add_app_metadata "$app_id" "app" "$app_dir"
-mark_installed "$app_id" "$app_version"
-info "'$app_id' $app_version installed."
+add_app_metadata "$app" "app" "$app_dir"
+mark_installed "$app" "$version"
 }
 uninstall_app(){
 local app="$1"
@@ -435,14 +327,13 @@ return 1
 }
 while IFS='=' read -r type path;do
 case "$type" in
-link)rm -f -- "$path"
+link)rm -- "$path"
 ;;
 app)rm -rf -- "$path"
 esac
 done <"$metafile"
-rm -f -- "$metafile"
+rm -- "$metafile"
 mark_uninstalled "$app"
-hash -r
 }
 create_exec_links(){
 local package_root="$1"
@@ -458,7 +349,6 @@ local link
 local app_exec_path
 exec_links_array=()
 mkdir -p "$bin_dir"
-info "Creating exectable links..."
 while IFS=$'\t' read -r name relative_path;do
 [[ -n $name ]]||continue
 app_exec_path="${relative_path#*/}"
@@ -482,7 +372,7 @@ exec_links_array=()
 return 1
 fi
 exec_links_array+=("$link")
-info "$name" "*"
+info "Created executable link '$name'"
 done < <(jq -r '
             (.exec // {})
             | to_entries[]
@@ -494,7 +384,8 @@ return 0
 check_bin_path(){
 local bin_dir="$XDG_BIN_HOME"
 case ":$PATH:" in
-*":$bin_dir:"*)return 0
+*":$bin_dir:"*)info "'$bin_dir' is in PATH."
+return 0
 esac
 warning "'$bin_dir' is not in PATH."
 echo
@@ -505,83 +396,6 @@ echo
 echo "To make it permanent, add the same line to your shell"
 echo "startup configuration (for example ~/.bashrc)."
 echo
-return 0
-}
-find_package_root(){
-local directory="$1"
-if [[ -f "$directory/microsh.json" ]];then
-echo "$directory"
-return 0
-fi
-local entries=()
-while IFS= read -r -d '' entry;do
-entries+=("$entry")
-done < <(find "$directory" -mindepth 1 -maxdepth 1 -print0)
-if [[ ${#entries[@]} -eq 1 ]]&&[[ -d ${entries[0]} ]]&&[[ -f "${entries[0]}/microsh.json" ]];then
-echo "${entries[0]}"
-return 0
-fi
-return 1
-}
-get_package_payload(){
-local root="$1"
-local dir
-local count
-count="$(find "$root" -mindepth 1 -maxdepth 1 -type d ! -name '.*'|wc -l)"
-[[ $count -eq 1 ]]||return 1
-dir="$(find "$root" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print -quit)"
-printf '%s\n' "$dir"
-}
-validate_manifest(){
-local manifest="$1"
-if [[ ! -f $manifest ]];then
-error_print "microsh.json not found: $manifest"&&return 1
-fi
-if ! jq empty "$manifest" 2>/dev/null;then
-error_print "invalid JSON: $manifest"&&return 1
-fi
-if [[ "$(jq -r 'type' "$manifest")" != "object" ]];then
-error_print "microsh.json root must be an object"&&return 1
-fi
-local id
-local name
-local version
-id="$(jq -r '.id // empty' "$manifest")"
-name="$(jq -r '.name // empty' "$manifest")"
-version="$(jq -r '.version // empty' "$manifest")"
-if [[ -z $id ]];then
-error_print "microsh.json: missing 'id'"&&return 1
-fi
-if [[ -z $name ]];then
-error_print "microsh.json: missing 'name'"&&return 1
-fi
-if [[ -z $version ]];then
-error_print "microsh.json: missing 'version'"&&return 1
-fi
-if [[ "$(jq -r '.id | type' "$manifest")" != "string" ]];then
-error_print "microsh.json: 'id' must be a string"&&return 1
-fi
-if [[ "$(jq -r '.name | type' "$manifest")" != "string" ]];then
-error_print "microsh.json: 'name' must be a string"&&return 1
-fi
-if [[ "$(jq -r '.version | type' "$manifest")" != "string" ]];then
-error_print "microsh.json: 'version' must be a string"&&return 1
-fi
-if [[ ! $id =~ ^[a-z0-9]+([.-][a-z0-9]+)*$ ]];then
-error_print "microsh.json: invalid package id '$id'"&&return 1
-fi
-if jq -e '.description != null and (.description | type) != "string"' \
-"$manifest" >/dev/null;then
-error_print "microsh.json: 'description' must be a string"&&return 1
-fi
-if jq -e '.dependencies != null and (.dependencies | type) != "object"' \
-"$manifest" >/dev/null;then
-error_print "microsh.json: 'dependencies' must be an object"&&return 1
-fi
-if jq -e '.exec != null and (.exec | type) != "object"' \
-"$manifest" >/dev/null;then
-error_print "microsh.json: 'exec' must be an object"&&return 1
-fi
 return 0
 }
 cmd_list(){
@@ -608,24 +422,80 @@ jq -r '
 echo
 }
 cmd_install(){
-local target="${1:-}"
-if [[ -z $target ]];then
-error "missing package"
-fi
-if [[ -d $target ]];then
-install_from_package "$target"
-return $?
-fi
-if [[ -f $target ]];then
-if is_archive "$target";then
-install_from_archive "$target"
+local specification="$1"
+local app
+local version
+local latest
+local url
+local checksum
+local temporary_dir
+local archive
+local package_root
+local app_dir
+local installer_json
+if [[ $specification == *@* ]];then
+app="${specification%@*}"
+version="${specification##*@}"
+[[ -n $app ]]||error "invalid application name"
+[[ -n $version ]]||error "invalid version"
 else
-install_from_package "$target"
+app="$specification"
+version=""
 fi
-return $?
+ensure_catalog
+if ! app_exists "$app";then
+error "application '$app' is not in the microsh catalog"
 fi
-install_from_remote "$target"
+if [[ -z $version ]];then
+version="$(latest_version "$app")"
+[[ -n $version ]]||error "no latest version is defined for '$app'"
+else
+if ! version_exists "$app" "$version";then
+error "version '$version' of '$app' is not available"
+fi
+fi
+url="$(package_url "$app" "$version")"
+[[ -n $url ]]||error "no package URL is defined for '$app' version '$version'"
+checksum="$(package_sha256 "$app" "$version")"
+if is_installed "$app";then
+local current_version
+current_version="$(installed_version "$app")"
+if [[ $current_version == "$version" ]];then
+info "'$app' $version is already installed"
+exit 0
+fi
+info "'$app' $current_version is installed."
+info "Replacing it with '$app' $version..."
+uninstall_app "$app" "$MICROSH_METADATA_DIR"
+fi
+temporary_dir="$(mktemp -d)"
+archive="$temporary_dir/$(basename "${url%%\?*}")"
+info "Downloading '$app' $version $url"
+if ! download "$url" >"$archive";then
+rm -rf "$temporary_dir"
+error "could not download '$app' $version"
+fi
+verify_checksum "$archive" "$checksum"
+info "Extracting '$app' $version..."
+mkdir -p "$temporary_dir/extracted"
+extract_archive \
+"$archive" \
+"$temporary_dir/extracted"
+package_root="$(find_package_root "$temporary_dir/extracted")"||{
+rm -rf "$temporary_dir"
+error "'$app' package does not contain microsh.json"
+}
+if ! resolve_dependencies "$package_root";then
+rm -rf "$temporary_dir"
+error "dependency requirements are not satisfied"
+fi
+if ! install_app "$app" "$version" "$package_root" "$MICROSH_APPS_DIR" "$XDG_BIN_HOME";then
+rm -rf "$temporary_dir"
+exit 1
+fi
 check_bin_path
+info "'$app' $version installed."
+rm -rf -- "$temporary_dir"
 }
 cmd_uninstall(){
 local app="$1"

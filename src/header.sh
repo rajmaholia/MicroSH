@@ -2,13 +2,16 @@
 # Global variables
 # ------------------------------------------------------------
 # Version
-VERSION="2.0.1"
+VERSION="2.1.0"
 
 # Microsh Catalog
 MICROSH_CATALOG_USER="rajmaholia"
 MICROSH_CATALOG_REPO="MicroSH-Catalog"
 MICROSH_CATALOG_BRANCH="main"
 MICROSH_CATALOG_URL="https://raw.githubusercontent.com/${MICROSH_CATALOG_USER}/${MICROSH_CATALOG_REPO}/${MICROSH_CATALOG_BRANCH}/catalog.json"
+
+# MicroSH Release
+MICROSH_RELEASE_API='https://api.github.com/repos/rajmaholia/MicroSH/releases'
 
 # Standard Paths
 XDG_BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
@@ -23,7 +26,7 @@ MICROSH_CACHE_DIR="$XDG_CACHE_HOME/microsh"
 # Installed application packages
 MICROSH_APPS_DIR="${XDG_DATA_HOME:-$HOME}/microsh-apps"
 
-# MicroSH catalog
+# Local MicroSH catalog
 MICROSH_CATALOG="$MICROSH_CACHE_DIR/catalog.json"
 
 # Installed package registry

@@ -77,3 +77,7 @@ cmd_uninstall() {
 cmd_help() {
   show_help
 }
+
+cmd_selfupdate() {
+  self_update "$@"
+}
