@@ -22,10 +22,22 @@ Usage:
   microsh uninstall <app>
       Uninstall an application.
 
-  microsh help
+  microsh self-update
+      Update MicroSH to the latest version.
+
+  microsh self-update -l|--list
+      List available MicroSH versions.
+
+  microsh self-update -c|--check
+      Check for a newer MicroSH version.
+
+  microsh self-update -v|--version <version>
+      Install a specific MicroSH version.
+
+  microsh help|-h
       Show this help.
 
-  microsh version
+  microsh version|-v
       Show MicroSH version.
 
 Examples:
@@ -40,6 +52,11 @@ Examples:
 
   microsh uninstall Qnote
 
-EOF
+  microsh self-update
 
+  microsh self-update --check
+
+  microsh self-update --version 2.2.0
+
+EOF
 }
